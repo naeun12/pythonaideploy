@@ -7,22 +7,29 @@ import mysql.connector
 
 app = Flask(__name__)
 
-# OpenRouter API key and base URL
-openai.api_key = os.getenv("OPENROUTER_API_KEY") or "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"
-openai.api_base = os.getenv("OPENROUTER_API_BASE") or "https://openrouter.ai/api/v1"
+# ------------------------
+# OpenRouter / OpenAI API
+# ------------------------
+openai.api_key = os.getenv("OPENROUTER_API_KEY")
+openai.api_base = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
 openai.api_type = "open_ai"
 openai.api_version = None
 
-# Connect to MySQL database
+# ------------------------
+# Database Connection
+# ------------------------
 def get_db_connection():
     return mysql.connector.connect(
-        host="35.185.188.174",
-        user="dormhub",
-        password="dormH@b2025",
-        database="capstonedormhub"
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT", 3306)),
+        user=os.getenv("DB_USERNAME"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_DATABASE")
     )
 
-
+# ------------------------
+# Dormitories Endpoint
+# ------------------------
 @app.route("/ask-ai/dormitories", methods=["POST"])
 def ask_ai_dormitories():
     try:
@@ -31,7 +38,6 @@ def ask_ai_dormitories():
             return jsonify({"message": "No question provided", "result": [], "recommendations": []}), 400
 
         user_question = data.get("question", "").lower().strip()
-        print("User question:", user_question)
 
         # Keywords & cities
         room_keywords = ["room", "bedspace", "unit"]
@@ -66,7 +72,6 @@ def ask_ai_dormitories():
             price_filter_max = float(price_matches[1])
         elif len(price_matches) == 1:
             price_filter_max = float(price_matches[0])
-        print("Price filters:", price_filter_min, price_filter_max)
 
         # Connect to DB
         conn = get_db_connection()
@@ -84,10 +89,9 @@ def ask_ai_dormitories():
             LEFT JOIN landlords l ON d.fklandlordID = l.landlordID
         """)
         dorms = cursor.fetchall()
-        print(f"Dorms fetched: {len(dorms)}")
+        conn.close()
 
         if not dorms:
-            conn.close()
             return jsonify({"message": "No dorms available", "result": [], "recommendations": []})
 
         dorms_for_ui = []
@@ -99,7 +103,9 @@ def ask_ai_dormitories():
                 if not any(city in address_lower for city in user_cities):
                     continue
 
-            # Fetch rooms for this dorm
+            # Rooms for this dorm
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
             cursor.execute("""
                 SELECT ro.roomID, ro.roomNumber, ro.roomType, ro.availability, ro.price,
                        ro.furnishing_status, ro.genderPreference, ro.fkdormID, ro.fklandlordID,
@@ -111,6 +117,7 @@ def ask_ai_dormitories():
                 GROUP BY ro.roomID
             """, (dorm["dormID"],))
             rooms = cursor.fetchall()
+            conn.close()
 
             formatted_rooms = []
             for room in rooms:
@@ -118,16 +125,13 @@ def ask_ai_dormitories():
                     price = float(room.get("price") or 0)
                 except (ValueError, TypeError):
                     price = 0
-
                 if price_filter_min is not None and price < price_filter_min:
                     continue
                 if price_filter_max is not None and price > price_filter_max:
                     continue
-
                 features = room.get("features") or ""
                 if isinstance(features, list):
                     features = ",".join(features)
-
                 formatted_rooms.append({
                     "roomID": room["roomID"],
                     "roomNumber": room["roomNumber"],
@@ -157,8 +161,6 @@ def ask_ai_dormitories():
                 }
             })
 
-        conn.close()
-
         if not dorms_for_ui:
             return jsonify({
                 "message": f"No available rooms in {', '.join(user_cities).title() if user_cities else 'Lapu-Lapu or Mandaue'} within the specified price range.",
@@ -167,13 +169,13 @@ def ask_ai_dormitories():
             })
 
         # Optional AI summary
-        full_prompt = f"""
+        ai_message = None
+        try:
+            full_prompt = f"""
 You are a friendly dorm recommendation assistant.
 Generate a short text summary for the user based on these dorms and rooms:
 {json.dumps(dorms_for_ui, default=str)}
 """
-        ai_message = None
-        try:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -198,7 +200,9 @@ Generate a short text summary for the user based on these dorms and rooms:
         traceback.print_exc()
         return jsonify({"message": str(e), "result": [], "recommendations": []}), 500
 
-
+# ------------------------
+# Single Dorm Endpoint
+# ------------------------
 @app.route("/ask-ai/<int:dorm_id>", methods=["POST"])
 def ask_ai(dorm_id):
     try:
@@ -225,14 +229,14 @@ def ask_ai(dorm_id):
             GROUP BY d.dormID
         """, (dorm_id,))
         dorm = cursor.fetchone()
-
         if not dorm:
             conn.close()
             return jsonify({"error": "Dorm not found"}), 404
 
-        # Fetch rooms and features
+        # Fetch rooms
         cursor.execute("""
-            SELECT ro.roomNumber, ro.roomType, ro.availability, ro.price, ro.furnishing_status, ro.genderPreference,
+            SELECT ro.roomNumber, ro.roomType, ro.availability, ro.price,
+                   ro.furnishing_status, ro.genderPreference,
                    GROUP_CONCAT(DISTINCT rf.featureName) as features
             FROM rooms ro
             LEFT JOIN room_features_rooms rfr ON ro.roomID = rfr.fkroomID
@@ -241,60 +245,49 @@ def ask_ai(dorm_id):
             GROUP BY ro.roomID
         """, (dorm_id,))
         rooms = cursor.fetchall()
-
-        # Fetch dorm images
-        cursor.execute("""
-            SELECT mainImage, secondaryImage, thirdImage
-            FROM dormimages
-            WHERE fkdormID = %s
-        """, (dorm_id,))
-        images = cursor.fetchone()
         conn.close()
 
-        # Get user question
         data = request.get_json()
-        user_question = data.get("question", "Tell me something about this dorm.")
+        question = data.get("question", f"Tell me about {dorm['dormName']}.")
 
-        # Format dorm + landlord info for GPT
-        landlord_info = f"{dorm.get('landlordFirstName', '')} {dorm.get('landlordLastName', '')}, Email: {dorm.get('landlordEmail', 'N/A')}, Phone: {dorm.get('landlordPhone', 'N/A')}"
-
-        dorm_info = f"""
-Name: {dorm['dormName']}
-Location: {dorm['address']}
-Description: {dorm['description']}
-Amenities: {dorm.get('amenities', 'None')}
-Rules & Policies: {dorm.get('rules', 'None')}
-Landlord: {landlord_info}
-Images: {images if images else 'No images'}
-"""
+        landlord_info = f"{dorm['landlordFirstName']} {dorm['landlordLastName']}, Email: {dorm.get('landlordEmail', 'N/A')}, Phone: {dorm.get('landlordPhone', 'N/A')}"
+        dorm_info = f"Name: {dorm['dormName']}\nAddress: {dorm['address']}\nDescription: {dorm['description']}\nAmenities: {dorm.get('amenities','None')}\nRules: {dorm.get('rules','None')}\nLandlord: {landlord_info}"
 
         rooms_info = ""
         for room in rooms:
-            rooms_info += f"- Room {room['roomNumber']}, Type: {room['roomType']}, Availability: {room['availability']}, Price: {room['price']}, Furnishing: {room['furnishing_status']}, Gender Preference: {room['genderPreference']}, Features: {room.get('features', 'None')}\n"
+            features = room.get("features") or "None"
+            rooms_info += f"- Room {room['roomNumber']}, Type: {room['roomType']}, Price: {room['price']}, Availability: {room['availability']}, Furnishing: {room['furnishing_status']}, Gender: {room['genderPreference']}, Features: {features}\n"
 
-        full_prompt = f"{dorm_info}\nRooms:\n{rooms_info}\n\nQuestion: {user_question}"
+        prompt = f"{dorm_info}\nRooms:\n{rooms_info}\n\nTenant Question: {question}"
 
-        # Call OpenAI GPT-4o-mini
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an assistant helping tenants learn about dormitories."},
-                {"role": "user", "content": full_prompt}
-            ]
-        )
-
-        ai_answer = response['choices'][0]['message']['content']
+        ai_answer = None
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an assistant that summarizes a single dorm and its rooms for tenants."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            ai_answer = response['choices'][0]['message']['content']
+        except Exception as e:
+            print("❌ OpenAI API error:", e)
+            ai_answer = "AI recommendations unavailable. Showing dorm info only."
 
         return jsonify({
             "answer": ai_answer,
             "dorm": dorm,
-            "rooms": rooms,
-            "images": images
+            "rooms": rooms
         })
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
+# ------------------------
+# Run on Railway
+# ------------------------
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
