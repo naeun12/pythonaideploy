@@ -1,19 +1,19 @@
 from flask import Flask, request, jsonify
 import json
 import re
-import openai
 import os
 import mysql.connector
+from openai import OpenAI
 
 app = Flask(__name__)
 
 # ------------------------
-# OpenRouter / OpenAI API
+# OpenRouter / OpenAI API (NEW FORMAT)
 # ------------------------
-openai.api_key = os.getenv("OPENROUTER_API_KEY")
-openai.api_base = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
-openai.api_type = "open_ai"
-openai.api_version = None
+client = OpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url=os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+)
 
 # ------------------------
 # Database Connection
@@ -56,7 +56,7 @@ def ask_ai_dormitories():
                 "recommendations": []
             })
 
-        # Blocked city
+        # Blocked cities
         if any(city in user_question for city in blocked_cities):
             return jsonify({
                 "message": "Sorry, DormHub currently only has dorms in Lapu-Lapu or Mandaue.",
@@ -67,6 +67,7 @@ def ask_ai_dormitories():
         # Price filter
         price_matches = re.findall(r"\$?(\d{3,5})", user_question)
         price_filter_min, price_filter_max = None, None
+
         if len(price_matches) >= 2:
             price_filter_min = float(price_matches[0])
             price_filter_max = float(price_matches[1])
@@ -121,17 +122,15 @@ def ask_ai_dormitories():
 
             formatted_rooms = []
             for room in rooms:
-                try:
-                    price = float(room.get("price") or 0)
-                except (ValueError, TypeError):
-                    price = 0
+                price = float(room.get("price") or 0)
+
+                # Apply price filters
                 if price_filter_min is not None and price < price_filter_min:
                     continue
                 if price_filter_max is not None and price > price_filter_max:
                     continue
+
                 features = room.get("features") or ""
-                if isinstance(features, list):
-                    features = ",".join(features)
                 formatted_rooms.append({
                     "roomID": room["roomID"],
                     "roomNumber": room["roomNumber"],
@@ -169,14 +168,14 @@ def ask_ai_dormitories():
             })
 
         # Optional AI summary
-        ai_message = None
-        try:
-            full_prompt = f"""
+        full_prompt = f"""
 You are a friendly dorm recommendation assistant.
 Generate a short text summary for the user based on these dorms and rooms:
 {json.dumps(dorms_for_ui, default=str)}
 """
-            response = openai.ChatCompletion.create(
+
+        try:
+            response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You help users find dorm rooms."},
@@ -184,7 +183,7 @@ Generate a short text summary for the user based on these dorms and rooms:
                 ],
                 temperature=0.3
             )
-            ai_message = response['choices'][0]['message']['content']
+            ai_message = response.choices[0].message.content
         except Exception as e:
             print("❌ OpenAI API error:", e)
             ai_message = "AI recommendations unavailable. Showing dorms from database only."
@@ -229,6 +228,7 @@ def ask_ai(dorm_id):
             GROUP BY d.dormID
         """, (dorm_id,))
         dorm = cursor.fetchone()
+
         if not dorm:
             conn.close()
             return jsonify({"error": "Dorm not found"}), 404
@@ -251,7 +251,15 @@ def ask_ai(dorm_id):
         question = data.get("question", f"Tell me about {dorm['dormName']}.")
 
         landlord_info = f"{dorm['landlordFirstName']} {dorm['landlordLastName']}, Email: {dorm.get('landlordEmail', 'N/A')}, Phone: {dorm.get('landlordPhone', 'N/A')}"
-        dorm_info = f"Name: {dorm['dormName']}\nAddress: {dorm['address']}\nDescription: {dorm['description']}\nAmenities: {dorm.get('amenities','None')}\nRules: {dorm.get('rules','None')}\nLandlord: {landlord_info}"
+
+        dorm_info = f"""
+Name: {dorm['dormName']}
+Address: {dorm['address']}
+Description: {dorm['description']}
+Amenities: {dorm.get('amenities','None')}
+Rules: {dorm.get('rules','None')}
+Landlord: {landlord_info}
+"""
 
         rooms_info = ""
         for room in rooms:
@@ -260,16 +268,16 @@ def ask_ai(dorm_id):
 
         prompt = f"{dorm_info}\nRooms:\n{rooms_info}\n\nTenant Question: {question}"
 
-        ai_answer = None
+        # AI response
         try:
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are an assistant that summarizes a single dorm and its rooms for tenants."},
                     {"role": "user", "content": prompt}
                 ]
             )
-            ai_answer = response['choices'][0]['message']['content']
+            ai_answer = response.choices[0].message.content
         except Exception as e:
             print("❌ OpenAI API error:", e)
             ai_answer = "AI recommendations unavailable. Showing dorm info only."
@@ -291,4 +299,3 @@ def ask_ai(dorm_id):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
-
