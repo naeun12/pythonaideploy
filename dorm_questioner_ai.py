@@ -250,6 +250,9 @@ Do not recommend dormitories outside Surigao City.
 
 @app.route("/ask-ai/<int:dorm_id>", methods=["POST"])
 def ask_ai(dorm_id):
+    conn = None
+    cursor = None
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
@@ -271,18 +274,25 @@ def ask_ai(dorm_id):
             LEFT JOIN rulesandpolicydorm rd ON d.dormID = rd.fkdormID
             LEFT JOIN rulesandpolicies r ON rd.fkruleID = r.id
             WHERE d.dormID = %s
-              AND LOWER(d.address) LIKE %s
             GROUP BY d.dormID
-        """, (dorm_id, "%surigao city%"))
+        """, (dorm_id,))
 
         dorm = cursor.fetchone()
 
+        # Check if dorm exists
         if not dorm:
-            cursor.close()
-            conn.close()
-
             return jsonify({
-                "error": "Dorm not found or not available in Surigao City."
+                "success": False,
+                "error": "Dormitory not found."
+            }), 404
+
+        # Validate Surigao City address
+        address = (dorm.get("address") or "").lower()
+
+        if "surigao city" not in address:
+            return jsonify({
+                "success": False,
+                "error": "This dormitory is not located in Surigao City."
             }), 404
 
         # Fetch rooms
@@ -302,30 +312,40 @@ def ask_ai(dorm_id):
 
         rooms = cursor.fetchall()
 
+        # Close database connection after fetching data
         cursor.close()
-        conn.close()
+        cursor = None
 
-        data = request.get_json() or {}
+        conn.close()
+        conn = None
+
+        # Get tenant question
+        data = request.get_json(silent=True) or {}
+
         question = data.get(
             "question",
             f"Tell me about {dorm['dormName']}."
         )
 
+        # Landlord information
         landlord_info = (
-            f"{dorm['landlordFirstName']} {dorm['landlordLastName']}, "
+            f"{dorm.get('landlordFirstName') or 'N/A'} "
+            f"{dorm.get('landlordLastName') or ''}, "
             f"Email: {dorm.get('landlordEmail') or 'N/A'}, "
             f"Phone: {dorm.get('landlordPhone') or 'N/A'}"
         )
 
+        # Dormitory information
         dorm_info = f"""
 Dormitory Name: {dorm['dormName']}
 Location: {dorm['address']}
-Description: {dorm['description']}
+Description: {dorm.get('description') or 'Not provided'}
 Amenities: {dorm.get('amenities') or 'None'}
 Rules: {dorm.get('rules') or 'None'}
 Landlord: {landlord_info}
 """
 
+        # Room information
         rooms_info = ""
 
         for room in rooms:
@@ -341,6 +361,7 @@ Landlord: {landlord_info}
   Features: {features}
 """
 
+        # AI prompt
         prompt = f"""
 You are DormDash's friendly AI dormitory assistant.
 
@@ -366,8 +387,7 @@ IMPORTANT RULES:
 6. If the question is unrelated to this dormitory, politely redirect the tenant to dorm-related questions.
 """
 
-        ai_answer = None
-
+        # Generate AI answer
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
@@ -387,22 +407,38 @@ IMPORTANT RULES:
             ai_answer = response["choices"][0]["message"]["content"]
 
         except Exception as e:
-            print("❌ OpenAI API error:", e)
-            ai_answer = "AI recommendations unavailable. Showing dorm information only."
+            print("OpenAI API error:", str(e))
 
+            ai_answer = (
+                "AI recommendations unavailable. "
+                "Showing dorm information only."
+            )
+
+        # Return response
         return jsonify({
+            "success": True,
             "answer": ai_answer,
             "dorm": dorm,
             "rooms": rooms
-        })
+        }), 200
 
     except Exception as e:
         import traceback
         traceback.print_exc()
 
         return jsonify({
+            "success": False,
             "error": str(e)
         }), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
