@@ -247,7 +247,6 @@ Do not recommend dormitories outside Surigao City.
         }), 500
 
 
-@app.route("/ask-ai/<int:dorm_id>", methods=["POST"])
 
 @app.route("/ask-ai/<int:dorm_id>", methods=["POST"])
 def ask_ai(dorm_id):
