@@ -247,32 +247,42 @@ Do not recommend dormitories outside Surigao City.
         }), 500
 
 
-
 @app.route("/ask-ai/<int:dorm_id>", methods=["POST"])
 def ask_ai(dorm_id):
     conn = None
     cursor = None
 
     try:
+        # Connect to database
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
         # Fetch dorm + landlord + amenities + rules
         cursor.execute("""
-            SELECT d.dormID, d.dormName, d.address, d.description,
-                   d.latitude, d.longitude,
-                   GROUP_CONCAT(DISTINCT a.aminityName) AS amenities,
-                   GROUP_CONCAT(DISTINCT r.rulesName) AS rules,
-                   l.firstname AS landlordFirstName,
-                   l.lastname AS landlordLastName,
-                   l.email AS landlordEmail,
-                   l.phonenumber AS landlordPhone
+            SELECT
+                d.dormID,
+                d.dormName,
+                d.address,
+                d.description,
+                d.latitude,
+                d.longitude,
+                GROUP_CONCAT(DISTINCT a.aminityName) AS amenities,
+                GROUP_CONCAT(DISTINCT r.rulesName) AS rules,
+                l.firstname AS landlordFirstName,
+                l.lastname AS landlordLastName,
+                l.email AS landlordEmail,
+                l.phonenumber AS landlordPhone
             FROM dorms d
-            LEFT JOIN landlords l ON d.fklandlordID = l.landlordID
-            LEFT JOIN amenitydorm ad ON d.dormID = ad.fkdormID
-            LEFT JOIN amenities a ON ad.fkaminityID = a.id
-            LEFT JOIN rulesandpolicydorm rd ON d.dormID = rd.fkdormID
-            LEFT JOIN rulesandpolicies r ON rd.fkruleID = r.id
+            LEFT JOIN landlords l
+                ON d.fklandlordID = l.landlordID
+            LEFT JOIN amenitydorm ad
+                ON d.dormID = ad.fkdormID
+            LEFT JOIN amenities a
+                ON ad.fkaminityID = a.id
+            LEFT JOIN rulesandpolicydorm rd
+                ON d.dormID = rd.fkdormID
+            LEFT JOIN rulesandpolicies r
+                ON rd.fkruleID = r.id
             WHERE d.dormID = %s
             GROUP BY d.dormID
         """, (dorm_id,))
@@ -286,10 +296,13 @@ def ask_ai(dorm_id):
                 "error": "Dormitory not found."
             }), 404
 
-        # Validate Surigao City address
+        # Validate Surigao location
         address = (dorm.get("address") or "").lower()
 
-        if "surigao city" not in address:
+        if not (
+            "surigao city" in address
+            or "surigao del norte" in address
+        ):
             return jsonify({
                 "success": False,
                 "error": "This dormitory is not located in Surigao City."
@@ -297,10 +310,14 @@ def ask_ai(dorm_id):
 
         # Fetch rooms
         cursor.execute("""
-            SELECT ro.roomNumber, ro.roomType, ro.availability,
-                   ro.price, ro.furnishing_status,
-                   ro.genderPreference,
-                   GROUP_CONCAT(DISTINCT rf.featureName) AS features
+            SELECT
+                ro.roomNumber,
+                ro.roomType,
+                ro.availability,
+                ro.price,
+                ro.furnishing_status,
+                ro.genderPreference,
+                GROUP_CONCAT(DISTINCT rf.featureName) AS features
             FROM rooms ro
             LEFT JOIN room_features_rooms rfr
                 ON ro.roomID = rfr.fkroomID
@@ -312,7 +329,7 @@ def ask_ai(dorm_id):
 
         rooms = cursor.fetchall()
 
-        # Close database connection after fetching data
+        # Close database connection
         cursor.close()
         cursor = None
 
@@ -326,6 +343,93 @@ def ask_ai(dorm_id):
             "question",
             f"Tell me about {dorm['dormName']}."
         )
+
+        question = str(question).strip()
+
+        # Check empty question
+        if not question:
+            return jsonify({
+                "success": False,
+                "error": "Please enter a message."
+            }), 400
+
+        # Normalize question for greeting detection
+        normalized_question = question.lower().strip()
+        normalized_question = normalized_question.rstrip("!.,? ")
+
+        # Greeting responses
+        greeting_responses = {
+            "hello": (
+                f"Hello! 👋 Welcome to DormDash! "
+                f"I'm your AI dormitory assistant. "
+                f"How can I help you today?"
+            ),
+
+            "hi": (
+                f"Hi there! 😊 Welcome to DormDash! "
+                f"What would you like to know about {dorm['dormName']}?"
+            ),
+
+            "hii": (
+                f"Hii! 👋 Nice to meet you! "
+                f"How can I assist you with your dormitory needs today?"
+            ),
+
+            "hiii": (
+                f"Hiii! 😊 Welcome to DormDash! "
+                f"Feel free to ask me anything about this dorm."
+            ),
+
+            "hey": (
+                f"Hey there! 👋 I'm your DormDash AI assistant. "
+                f"What can I help you with?"
+            ),
+
+            "heyy": (
+                f"Heyyy! 😊 Welcome to DormDash! "
+                f"What would you like to know?"
+            ),
+
+            "good morning": (
+                f"Good morning! ☀️ Welcome to DormDash! "
+                f"How can I help you today?"
+            ),
+
+            "good afternoon": (
+                f"Good afternoon! 😊 Welcome to DormDash! "
+                f"What can I help you with?"
+            ),
+
+            "good evening": (
+                f"Good evening! 🌙 Welcome to DormDash! "
+                f"How may I assist you today?"
+            ),
+
+            "good day": (
+                f"Good day! 👋 Welcome to DormDash! "
+                f"How can I assist you?"
+            ),
+
+            "hola": (
+                f"Hola! 👋 Welcome to DormDash! "
+                f"How can I help you today?"
+            ),
+
+            "sup": (
+                f"Hey! 😎 Welcome to DormDash! "
+                f"What would you like to know about this dorm?"
+            )
+        }
+
+        # Return greeting without calling AI API
+        if normalized_question in greeting_responses:
+
+            return jsonify({
+                "success": True,
+                "answer": greeting_responses[normalized_question],
+                "dorm": dorm,
+                "rooms": rooms
+            }), 200
 
         # Landlord information
         landlord_info = (
@@ -385,6 +489,7 @@ IMPORTANT RULES:
 4. Keep answers short, clear, and friendly.
 5. Do not recommend dormitories outside Surigao City.
 6. If the question is unrelated to this dormitory, politely redirect the tenant to dorm-related questions.
+7. Be friendly and conversational.
 """
 
         # Generate AI answer
@@ -407,11 +512,13 @@ IMPORTANT RULES:
             ai_answer = response["choices"][0]["message"]["content"]
 
         except Exception as e:
+            import traceback
             print("OpenAI API error:", str(e))
+            traceback.print_exc()
 
             ai_answer = (
-                "AI recommendations unavailable. "
-                "Showing dorm information only."
+                "I'm sorry, my AI service is temporarily unavailable. "
+                "However, I can still help you with the available dormitory information."
             )
 
         # Return response
