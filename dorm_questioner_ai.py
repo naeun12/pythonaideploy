@@ -14,10 +14,16 @@ app = Flask(__name__)
 # ------------------------
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
 OPENROUTER_API_BASE = os.getenv(
     "OPENROUTER_API_BASE",
     "https://openrouter.ai/api/v1"
 )
+
+if not OPENROUTER_API_KEY:
+    raise RuntimeError(
+        "OPENROUTER_API_KEY is missing in Railway Variables."
+    )
 
 client = OpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -25,6 +31,11 @@ client = OpenAI(
 )
 
 MODEL_NAME = "openai/gpt-4o-mini"
+
+print("OpenRouter configuration loaded.")
+print("OpenRouter API key detected:", bool(OPENROUTER_API_KEY))
+print("OpenRouter model:", MODEL_NAME)
+
 
 # ------------------------
 # Database Connection
@@ -45,6 +56,7 @@ def get_db_connection():
 # ------------------------
 
 def generate_ai_answer(messages, temperature=0.3):
+
     if not OPENROUTER_API_KEY:
         raise ValueError("OPENROUTER_API_KEY is missing.")
 
@@ -63,6 +75,50 @@ def generate_ai_answer(messages, temperature=0.3):
 
 
 # ------------------------
+# Occupancy Type Helper
+# ------------------------
+
+def get_occupancy_type(rooms):
+
+    preferences = set()
+
+    for room in rooms:
+
+        preference = str(
+            room.get("genderPreference") or ""
+        ).strip()
+
+        if preference:
+            preferences.add(preference.lower())
+
+    if not preferences:
+        return "Not specified"
+
+    if len(preferences) > 1:
+        return "Mixed"
+
+    preference = next(iter(preferences))
+
+    if "female" in preference:
+        return "Female only"
+
+    if "male" in preference:
+        return "Male only"
+
+    if "mixed" in preference or "both" in preference:
+        return "Mixed"
+
+    return next(
+        (
+            room.get("genderPreference")
+            for room in rooms
+            if room.get("genderPreference")
+        ),
+        "Not specified"
+    )
+
+
+# ------------------------
 # Dormitories Recommendation
 # ------------------------
 
@@ -73,16 +129,19 @@ def ask_ai_dormitories():
     cursor = None
 
     try:
+
         data = request.get_json(silent=True) or {}
 
-        if not data or "question" not in data:
+        if "question" not in data:
             return jsonify({
                 "message": "No question provided",
                 "result": [],
                 "recommendations": []
             }), 400
 
-        user_question = str(data.get("question", "")).lower().strip()
+        user_question = str(
+            data.get("question", "")
+        ).lower().strip()
 
         if not user_question:
             return jsonify({
@@ -91,7 +150,7 @@ def ask_ai_dormitories():
                 "recommendations": []
             }), 400
 
-        # Keywords and supported cities
+        # Keywords
         room_keywords = ["room", "bedspace", "unit"]
         greetings = ["hello", "hi", "hey"]
 
@@ -103,6 +162,7 @@ def ask_ai_dormitories():
             word in user_question
             for word in room_keywords
         ):
+
             return jsonify({
                 "message": (
                     "Hello! I am your DormDash assistant. "
@@ -114,15 +174,13 @@ def ask_ai_dormitories():
             })
 
         # Only allow Surigao City
-        # Do not block Surigao City itself.
-        supported_city = "surigao city"
-
         mentioned_cities = re.findall(
             r"\b(?:cebu|mandaue|lapu-lapu|davao|manila)\b",
             user_question
         )
 
         if mentioned_cities:
+
             return jsonify({
                 "message": (
                     "Sorry, DormDash currently only has "
@@ -142,10 +200,12 @@ def ask_ai_dormitories():
         price_filter_max = None
 
         if len(price_matches) >= 2:
+
             price_filter_min = float(price_matches[0])
             price_filter_max = float(price_matches[1])
 
         elif len(price_matches) == 1:
+
             price_filter_max = float(price_matches[0])
 
         # Database connection
@@ -164,10 +224,14 @@ def ask_ai_dormitories():
                 l.lastname AS landlordLastName,
                 l.email AS landlordEmail,
                 l.phonenumber AS landlordPhone
+
             FROM dorms d
+
             LEFT JOIN landlords l
                 ON d.fklandlordID = l.landlordID
+
             WHERE LOWER(d.address) LIKE %s
+
         """, ("%surigao city%",))
 
         dorms = cursor.fetchall()
@@ -179,6 +243,7 @@ def ask_ai_dormitories():
         conn = None
 
         if not dorms:
+
             return jsonify({
                 "message": "No dormitories available in Surigao City.",
                 "result": [],
@@ -192,6 +257,7 @@ def ask_ai_dormitories():
             conn = get_db_connection()
             cursor = conn.cursor(dictionary=True)
 
+            # Fetch rooms and features
             cursor.execute("""
                 SELECT
                     ro.roomID,
@@ -203,16 +269,23 @@ def ask_ai_dormitories():
                     ro.genderPreference,
                     ro.fkdormID,
                     ro.fklandlordID,
+
                     GROUP_CONCAT(
                         DISTINCT rf.featureName
                     ) AS features
+
                 FROM rooms ro
+
                 LEFT JOIN room_features_rooms rfr
                     ON ro.roomID = rfr.fkroomID
+
                 LEFT JOIN roomfeatures rf
                     ON rfr.fkfeatureID = rf.id
+
                 WHERE ro.fkdormID = %s
+
                 GROUP BY ro.roomID
+
             """, (dorm["dormID"],))
 
             rooms = cursor.fetchall()
@@ -229,17 +302,18 @@ def ask_ai_dormitories():
 
                 try:
                     price = float(room.get("price") or 0)
+
                 except (ValueError, TypeError):
                     price = 0
 
-                # Apply minimum price
+                # Minimum price filter
                 if (
                     price_filter_min is not None
                     and price < price_filter_min
                 ):
                     continue
 
-                # Apply maximum price
+                # Maximum price filter
                 if (
                     price_filter_max is not None
                     and price > price_filter_max
@@ -249,40 +323,60 @@ def ask_ai_dormitories():
                 features = room.get("features") or ""
 
                 formatted_rooms.append({
+
                     "roomID": room["roomID"],
                     "roomNumber": room["roomNumber"],
                     "type": room["roomType"],
                     "price": price,
                     "availability": room["availability"],
+
+                    "genderPreference": room.get(
+                        "genderPreference"
+                    ),
+
                     "features": (
                         features.split(",") if features else []
                     )
+
                 })
 
             if not formatted_rooms:
                 continue
 
+            # Actual occupancy type based on room preferences
+            occupancy_type = get_occupancy_type(rooms)
+
             dorms_for_ui.append({
+
                 "dormID": dorm["dormID"],
                 "dormName": dorm["dormName"],
                 "address": dorm["address"],
-                "occupancyType": "Mixed",
+
+                "occupancyType": occupancy_type,
+
                 "amenities": "",
                 "rules": [],
                 "rooms": formatted_rooms,
                 "dormimages": {},
+
                 "fklandlordID": dorm["fklandlordID"],
+
                 "landlord": {
+
                     "name": (
                         f"{dorm['landlordFirstName'] or ''} "
                         f"{dorm['landlordLastName'] or ''}"
                     ).strip(),
+
                     "email": dorm.get("landlordEmail") or "N/A",
                     "phone": dorm.get("landlordPhone") or "N/A"
+
                 }
+
             })
 
         if not dorms_for_ui:
+
             return jsonify({
                 "message": (
                     "No available rooms in Surigao City "
@@ -296,6 +390,7 @@ def ask_ai_dormitories():
         ai_message = None
 
         try:
+
             full_prompt = f"""
 You are a friendly dorm recommendation assistant.
 
@@ -310,11 +405,13 @@ IMPORTANT:
 - Recommend only the provided dormitories.
 - Do not invent prices or room availability.
 - Mention relevant room prices and features.
+- Mention occupancy type when relevant.
 - Keep the answer short and friendly.
 - Do not recommend dormitories outside Surigao City.
 """
 
             ai_message = generate_ai_answer([
+
                 {
                     "role": "system",
                     "content": (
@@ -322,13 +419,16 @@ IMPORTANT:
                         "in Surigao City only."
                     )
                 },
+
                 {
                     "role": "user",
                     "content": full_prompt
                 }
+
             ])
 
         except Exception as e:
+
             print("OpenRouter API error:", str(e))
             traceback.print_exc()
 
@@ -338,9 +438,11 @@ IMPORTANT:
             )
 
         return jsonify({
+
             "message": ai_message,
             "result": dorms_for_ui,
             "recommendations": dorms_for_ui
+
         })
 
     except Exception as e:
@@ -348,9 +450,11 @@ IMPORTANT:
         traceback.print_exc()
 
         return jsonify({
+
             "message": str(e),
             "result": [],
             "recommendations": []
+
         }), 500
 
     finally:
@@ -387,47 +491,63 @@ def ask_ai(dorm_id):
                 d.description,
                 d.latitude,
                 d.longitude,
+
                 GROUP_CONCAT(
                     DISTINCT a.aminityName
                 ) AS amenities,
+
                 GROUP_CONCAT(
                     DISTINCT r.rulesName
                 ) AS rules,
+
                 l.firstname AS landlordFirstName,
                 l.lastname AS landlordLastName,
                 l.email AS landlordEmail,
                 l.phonenumber AS landlordPhone
+
             FROM dorms d
+
             LEFT JOIN landlords l
                 ON d.fklandlordID = l.landlordID
+
             LEFT JOIN amenitydorm ad
                 ON d.dormID = ad.fkdormID
+
             LEFT JOIN amenities a
                 ON ad.fkaminityID = a.id
+
             LEFT JOIN rulesandpolicydorm rd
                 ON d.dormID = rd.fkdormID
+
             LEFT JOIN rulesandpolicies r
                 ON rd.fkruleID = r.id
+
             WHERE d.dormID = %s
+
             GROUP BY d.dormID
+
         """, (dorm_id,))
 
         dorm = cursor.fetchone()
 
         # Check if dorm exists
         if not dorm:
+
             return jsonify({
                 "success": False,
                 "error": "Dormitory not found."
             }), 404
 
         # Validate Surigao location
-        address = (dorm.get("address") or "").lower()
+        address = (
+            dorm.get("address") or ""
+        ).lower()
 
         if not (
             "surigao city" in address
             or "surigao del norte" in address
         ):
+
             return jsonify({
                 "success": False,
                 "error": (
@@ -444,16 +564,23 @@ def ask_ai(dorm_id):
                 ro.price,
                 ro.furnishing_status,
                 ro.genderPreference,
+
                 GROUP_CONCAT(
                     DISTINCT rf.featureName
                 ) AS features
+
             FROM rooms ro
+
             LEFT JOIN room_features_rooms rfr
                 ON ro.roomID = rfr.fkroomID
+
             LEFT JOIN roomfeatures rf
                 ON rfr.fkfeatureID = rf.id
+
             WHERE ro.fkdormID = %s
+
             GROUP BY ro.roomID
+
         """, (dorm_id,))
 
         rooms = cursor.fetchall()
@@ -476,6 +603,7 @@ def ask_ai(dorm_id):
         question = str(question).strip()
 
         if not question:
+
             return jsonify({
                 "success": False,
                 "error": "Please enter a message."
@@ -487,6 +615,7 @@ def ask_ai(dorm_id):
 
         # Greeting responses
         greeting_responses = {
+
             "hello": (
                 "Hello! 👋 Welcome to DormDash! "
                 "I'm your AI dormitory assistant. "
@@ -547,16 +676,19 @@ def ask_ai(dorm_id):
                 "Hey! 😎 Welcome to DormDash! "
                 "What would you like to know about this dorm?"
             )
+
         }
 
         # Return greeting without calling AI
         if normalized_question in greeting_responses:
 
             return jsonify({
+
                 "success": True,
                 "answer": greeting_responses[normalized_question],
                 "dorm": dorm,
                 "rooms": rooms
+
             }), 200
 
         # Landlord information
@@ -626,6 +758,7 @@ IMPORTANT RULES:
         try:
 
             ai_answer = generate_ai_answer([
+
                 {
                     "role": "system",
                     "content": (
@@ -633,10 +766,12 @@ IMPORTANT RULES:
                         "for Surigao City dormitories."
                     )
                 },
+
                 {
                     "role": "user",
                     "content": prompt
                 }
+
             ])
 
         except Exception as e:
@@ -652,10 +787,12 @@ IMPORTANT RULES:
 
         # Return response
         return jsonify({
+
             "success": True,
             "answer": ai_answer,
             "dorm": dorm,
             "rooms": rooms
+
         }), 200
 
     except Exception as e:
@@ -663,8 +800,10 @@ IMPORTANT RULES:
         traceback.print_exc()
 
         return jsonify({
+
             "success": False,
             "error": str(e)
+
         }), 500
 
     finally:
@@ -682,9 +821,12 @@ IMPORTANT RULES:
 
 @app.route("/", methods=["GET"])
 def health_check():
+
     return jsonify({
+
         "success": True,
         "message": "DormDash AI service is running."
+
     }), 200
 
 
