@@ -13,12 +13,16 @@ app = Flask(__name__)
 # OpenRouter API
 # ------------------------
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = (
+    os.getenv("OPENROUTER_API_KEY") or ""
+).strip()
 
-OPENROUTER_API_BASE = os.getenv(
-    "OPENROUTER_API_BASE",
-    "https://openrouter.ai/api/v1"
-)
+OPENROUTER_API_BASE = (
+    os.getenv(
+        "OPENROUTER_API_BASE",
+        "https://openrouter.ai/api/v1"
+    ) or ""
+).strip().rstrip("/")
 
 if not OPENROUTER_API_KEY:
     raise RuntimeError(
@@ -34,6 +38,7 @@ MODEL_NAME = "openai/gpt-4o-mini"
 
 print("OpenRouter configuration loaded.")
 print("OpenRouter API key detected:", bool(OPENROUTER_API_KEY))
+print("OpenRouter API key length:", len(OPENROUTER_API_KEY))
 print("OpenRouter model:", MODEL_NAME)
 
 
@@ -843,3 +848,4 @@ if __name__ == "__main__":
         port=port,
         debug=False
     )
+
